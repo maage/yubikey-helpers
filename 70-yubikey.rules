@@ -1,0 +1,5 @@
+ACTION=="add|change|remove", \
+   SUBSYSTEM=="input", \
+   ATTRS{idVendor}=="1050", \
+   ATTRS{idProduct}=="0010|0110|0111|0113|0114|0115|0116|0120|0401|0402|0403|0405|0406|0407|0410", \
+   RUN+="/usr/lib/udev/yubikey-udev-helper"
