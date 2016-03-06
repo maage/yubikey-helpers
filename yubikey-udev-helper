@@ -1,0 +1,155 @@
+#!/bin/sh
+#
+# Do actions based on yubikey actions
+#
+# Usage:
+# $0
+# It uses envs set by udev.
+#
+# Because udev does not allow to run jobs background we use "at now".
+# Also setting keyboard map needs udev run to end before everything is
+# in right place.
+
+ARGS="$@"
+EXE="$0"
+COMM="$(basename $0)"
+PID="$$"
+
+logmsg() {
+    local id=$(uuidgen|sed 's/-//g')
+    (
+	echo "PRIORITY=4"
+	[ -n "$id" ] && echo "MESSAGE_ID=$id"
+	echo "MESSAGE=$@"
+	echo "_COMM=$COMM"
+	echo "_EXE=$EXE"
+	echo "_CMDLINE=$ARGS"
+	echo "_PID=$PID"
+	echo "SYSLOG_IDENTIFIER=$COMM"
+    ) | logger --journald --id="$PID"
+}
+
+wait_for_file() {
+    local count=0
+    local f ff
+    while [ $count -lt 600 ];do
+	for ff in "$@"; do
+	    for f in $(echo $ff); do
+		[ -e "$f" ] && return 0
+	    done
+	done
+	count=$((count + 1))
+	usleep 100000 || return 1
+    done
+    return 1
+}
+
+#
+# Set keymap of yubikey to US
+#
+keymap() {
+    local pid f id
+
+    logmsg "YubiKey inserted - Setting keymap to US"
+
+    for pid in $(pgrep -f '^/usr/libexec/gnome-session-binary$'); do
+	[ -n "$pid" ] && [ -e /proc/"$pid"/environ ] || continue
+
+	unset DISPLAY
+	unset XAUTHORITY
+	eval $(sed -nrz '/^DISPLAY=|^XAUTHORITY=/{s/^/export /;s/$/\n/;p}' < /proc/"$pid"/environ)
+	[ -n "$DISPLAY" ] || continue
+	[ -n "$XAUTHORITY" ] || continue
+
+	wait_for_file $DEVLINKS /dev/input/by-id/usb-"$DEV_NAME"-event-kbd /dev/input/by-path/"$ID_PATH"* || continue
+	
+	for id in $(xinput list --id-only "$XINPUT_NAME");do
+	    
+	    /usr/bin/setxkbmap -device "$id" us || exit 1
+
+	    logmsg "YubiKey inserted - keymap US set on device=$id, DONE"
+
+	done
+
+    done
+}
+
+#
+# Screenlock when yubikey is removed
+#
+screenlock() {
+    local pid
+
+    logmsg "Yubikey removed - Locking screen"
+
+    for pid in $(pgrep -f '^/usr/libexec/gnome-session-binary$'); do
+
+	[ -n "$pid" ] && [ -e /proc/"$pid"/environ ] || continue
+	
+	unset DISPLAY
+	unset DBUS_SESSION_BUS_ADDRESS
+	eval $(sed -nrz '/^DISPLAY=|^DBUS_SESSION_BUS_ADDRESS=/{s/^/export /;s/$/\n/;p}' < /proc/"$pid"/environ)
+	[ -n "$DISPLAY" ] || continue
+	[ -n "$DBUS_SESSION_BUS_ADDRESS" ] || continue
+	
+	user=$(stat -c%U /proc/"$pid")
+	[ -n "$user" ] || continue
+
+	if [ -x /usr/bin/gnome-screensaver-command ]; then
+	    su -p "$user" -c '/usr/bin/gnome-screensaver-command --lock' || continue
+	    logmsg "YubiKey removed - screen lock DONE"
+	elif [ -x /usr/bin/dbus-send ]; then
+	    su -p "$user" -c '/usr/bin/dbus-send --reply-timeout=1 --type=method_call --dest=org.gnome.ScreenSaver /org/gnome/ScreenSaver org.gnome.ScreenSaver.Lock' || continue
+	    logmsg "YubiKey removed - screen lock DONE"
+	fi
+
+    done
+}
+
+if [ $# -ge 2 ]; then
+    ID="$1"; shift
+    ACTION="$1"; shift
+else
+    ID="$ID_VENDOR_ID:$ID_MODEL_ID"
+
+    [ -n "$ACTION" -a -n "$ID" ] || exit 1
+
+    logmsg "Starting: ID=$ID ACTION=$ACTION"
+
+    (
+echo "export ID_PATH=\"$ID_PATH\""
+echo "export DEVLINKS=\"$DEVLINKS\""
+echo /usr/lib/udev/"$COMM" "\"$ID\"" "\"$ACTION\""
+    ) | at now
+
+    exit 0
+fi
+
+logmsg "Started: ID=$ID ACTION=$ACTION"
+
+# Change this to match your strings,
+# see: ls -l /dev/input/by-id
+# and: xinput --list
+
+case "$ID" in
+    "1050:0114")
+    shift
+    DEV_NAME="Yubico_Yubikey_NEO_OTP+U2F"
+    XINPUT_NAME="Yubico Yubikey NEO OTP+U2F"
+    ;;
+    "1050:0407")
+    shift
+    DEV_NAME="Yubico_Yubikey_4_OTP+U2F+CCID"
+    XINPUT_NAME="Yubico Yubikey 4 OTP+U2F+CCID"
+    ;;
+    *)
+    exit 1
+    ;;
+esac
+
+case "$ACTION" in
+    add|change) keymap ;;
+    remove) screenlock ;;
+esac
+
+exit 0
